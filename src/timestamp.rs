@@ -10,11 +10,19 @@
 //! ```
 
 use std::fmt;
+use std::ops::{Add, Sub};
 use std::str::FromStr;
+use std::time::SystemTime;
 
-use chrono::{DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{
+    DateTime, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc,
+};
 
 use crate::FormatError;
+use crate::mention::IntoId;
+
+/// Start of Discord's snowflake clock (2015-01-01 00:00:00 UTC), in unix milliseconds.
+const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
 /// How Discord displays a timestamp. Examples are for 2026-11-25 14:30 in en-GB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -89,6 +97,19 @@ impl Timestamp {
         self.unix
     }
 
+    /// When a Discord ID (user, message, channel, …) was created.
+    ///
+    /// ```
+    /// use ds_format::Timestamp;
+    /// // Example snowflake from Discord's API docs: 2016-04-30 11:18:25 UTC.
+    /// assert_eq!(Timestamp::from_snowflake(175928847299117063).unix(), 1462015105);
+    /// ```
+    pub fn from_snowflake(id: impl IntoId) -> Self {
+        let ms = (id.into_id() >> 22) + DISCORD_EPOCH_MS;
+        // At most (2^42 + epoch) / 1000, which always fits in an i64.
+        Self::from_unix((ms / 1000) as i64)
+    }
+
     /// Parses a date, reading it as UTC if it has no offset of its own.
     ///
     /// Accepted forms:
@@ -147,9 +168,25 @@ impl Timestamp {
         self.plus_seconds(days.saturating_mul(86_400))
     }
 
+    pub fn plus_weeks(self, weeks: i64) -> Self {
+        self.plus_seconds(weeks.saturating_mul(604_800))
+    }
+
     /// `<t:unix:style>`
     pub fn format(self, style: Style) -> String {
-        format!("<t:{}:{}>", self.unix, style.letter())
+        self.styled(style).to_string()
+    }
+
+    /// Like [`format`](Self::format), but returns a value that writes itself
+    /// when displayed, without building a `String` first.
+    ///
+    /// ```
+    /// use ds_format::{Style, Timestamp};
+    /// let ts = Timestamp::from_unix(60);
+    /// assert_eq!(format!("ends {}", ts.styled(Style::Relative)), "ends <t:60:R>");
+    /// ```
+    pub fn styled(self, style: Style) -> Styled {
+        Styled { ts: self, style }
     }
 
     /// `<t:unix:t>`: 14:30
@@ -191,6 +228,43 @@ impl Timestamp {
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<t:{}>", self.unix)
+    }
+}
+
+/// A [`Timestamp`] with a [`Style`], from [`Timestamp::styled`]. `Display` writes `<t:unix:style>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Styled {
+    ts: Timestamp,
+    style: Style,
+}
+
+impl fmt::Display for Styled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<t:{}:{}>", self.ts.unix, self.style.letter())
+    }
+}
+
+/// Adds whole seconds; fractions of a second are dropped.
+impl Add<Duration> for Timestamp {
+    type Output = Self;
+
+    fn add(self, rhs: Duration) -> Self {
+        self.plus_seconds(rhs.num_seconds())
+    }
+}
+
+/// Subtracts whole seconds; fractions of a second are dropped.
+impl Sub<Duration> for Timestamp {
+    type Output = Self;
+
+    fn sub(self, rhs: Duration) -> Self {
+        self.plus_seconds(rhs.num_seconds().saturating_neg())
+    }
+}
+
+impl From<SystemTime> for Timestamp {
+    fn from(t: SystemTime) -> Self {
+        DateTime::<Utc>::from(t).into()
     }
 }
 
@@ -327,6 +401,7 @@ mod tests {
         assert_eq!(ts.long_date_time(), "<t:1795617000:F>");
         assert_eq!(ts.relative(), "<t:1795617000:R>");
         assert_eq!(ts.to_string(), "<t:1795617000>");
+        assert_eq!(ts.styled(Style::Relative).to_string(), ts.relative());
         for l in ["t", "T", "d", "D", "f", "F", "R"] {
             assert_eq!(l.parse::<Style>().unwrap().letter().to_string(), l);
         }
@@ -339,6 +414,11 @@ mod tests {
         assert_eq!(ts.plus_minutes(1).unix(), BASE + 60);
         assert_eq!(ts.plus_hours(-1).unix(), BASE - 3600);
         assert_eq!(ts.plus_days(1).unix(), BASE + 86_400);
+        assert_eq!(ts.plus_weeks(1).unix(), BASE + 604_800);
+        assert_eq!((ts + Duration::minutes(90)).unix(), BASE + 5400);
+        assert_eq!((ts - Duration::milliseconds(1500)).unix(), BASE - 1);
+        let st = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(BASE as u64);
+        assert_eq!(Timestamp::from(st).unix(), BASE);
         assert_eq!(Timestamp::from_unix(i64::MAX).plus_days(1).unix(), i64::MAX);
         let naive = NaiveDateTime::parse_from_str("2026-11-25 14:30", "%Y-%m-%d %H:%M").unwrap();
         assert_eq!(Timestamp::from(naive).unix(), BASE);
@@ -346,6 +426,17 @@ mod tests {
             "2026-11-25 14:30".parse::<Timestamp>().unwrap().unix(),
             BASE
         );
+    }
+
+    #[test]
+    fn snowflakes() {
+        // Example from Discord's API docs: 2016-04-30 11:18:25.796 UTC.
+        assert_eq!(
+            Timestamp::from_snowflake(175928847299117063).unix(),
+            1_462_015_105
+        );
+        assert_eq!(Timestamp::from_snowflake(0).unix(), 1_420_070_400);
+        assert!(Timestamp::from_snowflake(u64::MAX).unix() > 0);
     }
 
     #[cfg(feature = "tz")]
