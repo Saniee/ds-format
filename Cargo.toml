@@ -1,0 +1,17 @@
+[package]
+name = "ds-format"
+version = "0.1.0"
+edition = "2024"
+description = "Discord text formatting helpers: mentions, timestamps and markdown"
+readme = "README.md"
+
+[features]
+tz = ["dep:chrono-tz"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = { version = "0.10", optional = true }
+thiserror = "2"
+
+[package.metadata.docs.rs]
+all-features = true
